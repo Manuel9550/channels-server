@@ -19,8 +19,13 @@ const (
 )
 
 type PlayerMessage struct{
-	messageType MessageType
+	MessageType MessageType
 	playerId int
+}
+
+
+type ClientNotification struct {
+	MessageType MessageType
 }
 
 // keeps track of the player information
@@ -36,8 +41,8 @@ type Player struct {
 func (c *Player) readSocket() {
 	for {
 
-		// create the message that this player will send
-		messageReceived := PlayerMessage{}
+		// create the message that this player will send to the channel
+		messageReceived := ClientNotification{}
 		messageType := Disconnected
 		_, msg, err := c.conn.ReadMessage()
 		if err != nil {
@@ -53,20 +58,29 @@ func (c *Player) readSocket() {
 				messageType = Disconnected
 			} else {
 				// determine what type of message it is
-				messageType = messageReceived.messageType
+				messageType = messageReceived.MessageType
 			}
 		}
 
-		messageReceived.messageType = messageType
-		messageReceived.playerId = c.id
-		c.playerChannel <- messageReceived
+		PlayerMessageReceived := PlayerMessage{
+			MessageType: messageType,
+			playerId:    c.id,
+		}
+		c.playerChannel <- PlayerMessageReceived
 
-
+		// if the connection is closing, we need to break out of the loop
+		if messageType == Disconnected {
+			break
+		}
 	}
 }
 
 // the method responsible for writing to the players websocket
 func (c *Player) writeSocket(message PlayerMessage) {
+
+	// marshal the message
+	//stringifiedMessage, _ := json.Marshal(message)
+	//fmt.Println(stringifiedMessage)
 	c.conn.WriteJSON(message)
 }
 
@@ -87,7 +101,7 @@ func (c *PlayPool) Init() {
 	c.PoolChannel = make(chan PlayerMessage)
 
 	// start listening to the channel that the players will be sending information to
-	c.ListenToChannel()
+	go c.ListenToChannel()
 
 }
 
@@ -106,6 +120,10 @@ func (c *PlayPool) AddPlayer(player *Player) bool {
 		// start listening to the players websocket for info
 		go player.readSocket()
 
+		// since the player has been added, broadcast a 'new player message' to the other players
+
+		playerJoinedMessage := PlayerMessage{MessageType:Connected,playerId:player.id}
+		c.PoolChannel <- playerJoinedMessage
 		return true
 	} else {
 		return false
@@ -118,10 +136,13 @@ func (c *PlayPool) BroadCastToPlayers(message PlayerMessage) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	// prepares
+
+
 	// iterate through all the player messages
 	for _, player := range c.players {
 		// send this message to the current player, as long as it makes sense for them to receive it
-		switch message.messageType {
+		switch message.MessageType {
 		case Attack:
 			if player.id != message.playerId {
 				player.writeSocket(message)
@@ -148,7 +169,36 @@ func (c *PlayPool) ListenToChannel(){
 	for {
 		message := <- c.PoolChannel
 		// the only message we don't care about sending to other players are if a player scored a point
-		if message.messageType != Score {
+		if message.MessageType != Score {
+
+			// if the player disconnected, delete their spot in the PlayPool
+			if message.MessageType == Disconnected{
+				// lock the Player pool slice
+				c.lock.Lock()
+
+				// remove the player that has disconnected
+
+				// temp slice to store the head of the new array
+
+				if len(c.players) > 1 {
+					newPlayerSlice := append(c.players[:message.playerId], c.players[message.playerId+1:]...)
+
+					// set each players ID in the pool to be their original id
+					for i, player := range newPlayerSlice {
+						player.id = i + 1
+					}
+
+					// the new array is ready
+					c.players = newPlayerSlice
+
+				} else {
+					c.players = make([]*Player,0)
+				}
+
+
+				c.lock.Unlock()
+			}
+
 			c.BroadCastToPlayers(message)
 		} else {
 			// increase the players score by 1
@@ -177,33 +227,7 @@ type PoolPair struct {
 	PoolLock sync.Mutex
 }
 
-/*
-func AddNewPlayer(PoolSlice *[]PlayPool, player *Player) {
-	finalResult := false
 
-	// loop through every player pool, and check if there are any that can hold the new player
-	for _, currentPool := range *PoolSlice {
-
-		// lock this pool so others cannot add to it while we are using it
-		currentPool.lock.Lock()
-		finalResult = currentPool.AddPlayer(player)
-		currentPool.lock.Unlock()
-
-		if finalResult {
-			// success, player was added
-			break
-		}
-	}
-
-	// if there was no room in any of the player pools, a new pool must be created
-	newPool := CreatePlayerPool()
-
-	newPool.AddPlayer(player)
-
-
-
-}
-*/
 
 
 func main(){
@@ -244,9 +268,7 @@ func main(){
 			for _, currentPool := range PlayPools{
 
 				// lock this pool so others cannot add to it while we are using it
-				currentPool.lock.Lock()
 				finalResult = currentPool.AddPlayer(currentPlayer)
-				currentPool.lock.Unlock()
 
 				if finalResult {
 					// success, player was added
@@ -272,6 +294,7 @@ func main(){
 	// serving the css and scripts directories in their "proper" location
 	http.Handle("/css/", http.StripPrefix("/css/", http.FileServer(http.Dir("channels/css"))))
 	http.Handle("/scripts/", http.StripPrefix("/scripts/", http.FileServer(http.Dir("channels/scripts"))))
+	http.Handle("/images/", http.StripPrefix("/images/", http.FileServer(http.Dir("channels/images"))))
 
 	http.ListenAndServe(":3000", nil)
 }
